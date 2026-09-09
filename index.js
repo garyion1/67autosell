@@ -427,7 +427,11 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isStringSelectMenu()) {
     const category = interaction.values[0];
     if (interaction.customId === 'ticket_select') {
-      await createTicketChannel(interaction, user, guild, category);
+      if (category === 'buy' || category === 'sell') {
+        await showTicketDetailsModal(interaction, category);
+      } else {
+        await createTicketChannel(interaction, user, guild, category);
+      }
     } else if (interaction.customId === 'tokenticket_select') {
       await createTokenTicketChannel(interaction, user, guild, category);
     } else if (interaction.customId === 'ticket_priority_select') {
@@ -439,6 +443,8 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isModalSubmit()) {
     if (interaction.customId === 'ticket_rename_modal') {
       await handleTicketRenameModal(interaction);
+    } else if (interaction.customId.startsWith('ticket_details_modal:')) {
+      await handleTicketDetailsModal(interaction);
     }
     return;
   }
@@ -1151,6 +1157,8 @@ async function runAutomod(message) {
 
 // ============ TICKET SYSTEM ============
 
+const TICKET_CATEGORY_EMOJIS = { buy: '💰', sell: '📦', support: '🆘' };
+
 async function handlePanel(message) {
   if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
     return message.reply('❌ Only admins can create the ticket panel.');
@@ -1166,9 +1174,9 @@ async function handlePanel(message) {
     .setCustomId('ticket_select')
     .setPlaceholder('Select a ticket type')
     .addOptions(
-      { label: 'Buy', value: 'buy', emoji: '💰' },
-      { label: 'Sell', value: 'sell', emoji: '📦' },
-      { label: 'Support', value: 'support', emoji: '🆘' }
+      { label: 'Buy', value: 'buy', emoji: TICKET_CATEGORY_EMOJIS.buy },
+      { label: 'Sell', value: 'sell', emoji: TICKET_CATEGORY_EMOJIS.sell },
+      { label: 'Support', value: 'support', emoji: TICKET_CATEGORY_EMOJIS.support }
     );
 
   const row = new ActionRowBuilder().addComponents(menu);
@@ -1279,12 +1287,85 @@ async function openTicketChannel(guild, user, { slug, label, description }) {
 async function createTicketChannel(interaction, user, guild, category) {
   await interaction.deferReply({ ephemeral: true });
 
+  const emoji = TICKET_CATEGORY_EMOJIS[category] || '🎫';
   const categoryLabel = category.charAt(0).toUpperCase() + category.slice(1);
-  const description = category === 'buy'
-    ? `Ticket created by ${user}\n\nHow much would you like to buy, and in what currency?\n\nStaff will be with you shortly. Use \`,close\` to close this ticket.`
-    : undefined;
 
-  const result = await openTicketChannel(guild, user, { slug: `ticket-${category}`, label: `${categoryLabel} Ticket`, description }).catch((error) => {
+  const result = await openTicketChannel(guild, user, { slug: `ticket-${category}`, label: `${emoji} ${categoryLabel} Ticket` }).catch((error) => {
+    console.error('Error creating ticket:', error);
+    return { status: 'error' };
+  });
+
+  if (result.status === 'exists') return interaction.editReply(`❌ You already have an open ticket: <#${result.channelId}>`);
+  if (result.status === 'no_staff_role') return interaction.editReply('❌ Staff role not configured.');
+  if (result.status === 'error') return interaction.editReply('❌ Could not create ticket.');
+
+  await interaction.editReply(`✅ Ticket created: <#${result.channel.id}>`);
+}
+
+async function showTicketDetailsModal(interaction, category) {
+  const emoji = TICKET_CATEGORY_EMOJIS[category] || '🎫';
+  const categoryLabel = category.charAt(0).toUpperCase() + category.slice(1);
+
+  const modal = new ModalBuilder()
+    .setCustomId(`ticket_details_modal:${category}`)
+    .setTitle(`${emoji} ${categoryLabel} Ticket`);
+
+  const qtyInput = new TextInputBuilder()
+    .setCustomId('token_qty')
+    .setLabel('How many tokens?')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(50);
+
+  const moneyInput = new TextInputBuilder()
+    .setCustomId('money_amount')
+    .setLabel(category === 'buy' ? 'How much money are you spending?' : 'How much money do you want?')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(50);
+
+  const methodInput = new TextInputBuilder()
+    .setCustomId('payment_method')
+    .setLabel('Payment method (PayPal, CashApp, etc)')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(50);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(qtyInput),
+    new ActionRowBuilder().addComponents(moneyInput),
+    new ActionRowBuilder().addComponents(methodInput)
+  );
+
+  await interaction.showModal(modal);
+}
+
+async function handleTicketDetailsModal(interaction) {
+  const category = interaction.customId.split(':')[1];
+  const tokenQty = interaction.fields.getTextInputValue('token_qty');
+  const moneyAmount = interaction.fields.getTextInputValue('money_amount');
+  const paymentMethod = interaction.fields.getTextInputValue('payment_method');
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const emoji = TICKET_CATEGORY_EMOJIS[category] || '🎫';
+  const categoryLabel = category.charAt(0).toUpperCase() + category.slice(1);
+
+  const description = [
+    `Ticket created by ${interaction.user}`,
+    '',
+    `**Tokens:** ${tokenQty}`,
+    `**Money:** ${moneyAmount}`,
+    `**Payment Method:** ${paymentMethod}`,
+    '',
+    'Staff will be with you shortly. Use `,close` to close this ticket.',
+  ].join('\n');
+
+  const result = await openTicketChannel(interaction.guild, interaction.user, {
+    slug: `ticket-${category}`,
+    label: `${emoji} ${categoryLabel} Ticket`,
+    description,
+  }).catch((error) => {
     console.error('Error creating ticket:', error);
     return { status: 'error' };
   });
