@@ -427,13 +427,9 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isStringSelectMenu()) {
     const category = interaction.values[0];
     if (interaction.customId === 'ticket_select') {
-      if (category === 'buy' || category === 'sell') {
-        await showTicketDetailsModal(interaction, category);
-      } else {
-        await createTicketChannel(interaction, user, guild, category);
-      }
+      await createTicketChannel(interaction, user, guild, category);
     } else if (interaction.customId === 'tokenticket_select') {
-      await createTokenTicketChannel(interaction, user, guild, category);
+      await showTicketDetailsModal(interaction, category);
     } else if (interaction.customId === 'ticket_priority_select') {
       await handleTicketPrioritySelect(interaction);
     }
@@ -1302,13 +1298,18 @@ async function createTicketChannel(interaction, user, guild, category) {
   await interaction.editReply(`✅ Ticket created: <#${result.channel.id}>`);
 }
 
+const TOKEN_TICKET_TYPES = {
+  single: { slug: 'token-single', label: '🪙 Buy 1 Token' },
+  multi: { slug: 'token-multi', label: '🪙 Buy Multiple Tokens' },
+  bulk: { slug: 'token-bulk', label: '📦 Bulk Buy Tokens' },
+};
+
 async function showTicketDetailsModal(interaction, category) {
-  const emoji = TICKET_CATEGORY_EMOJIS[category] || '🎫';
-  const categoryLabel = category.charAt(0).toUpperCase() + category.slice(1);
+  const type = TOKEN_TICKET_TYPES[category] || { slug: 'token', label: '🪙 Token Purchase' };
 
   const modal = new ModalBuilder()
     .setCustomId(`ticket_details_modal:${category}`)
-    .setTitle(`${emoji} ${categoryLabel} Ticket`);
+    .setTitle(type.label);
 
   const qtyInput = new TextInputBuilder()
     .setCustomId('token_qty')
@@ -1319,7 +1320,7 @@ async function showTicketDetailsModal(interaction, category) {
 
   const moneyInput = new TextInputBuilder()
     .setCustomId('money_amount')
-    .setLabel(category === 'buy' ? 'How much money are you spending?' : 'How much money do you want?')
+    .setLabel('How much money are you spending?')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
     .setMaxLength(50);
@@ -1348,8 +1349,7 @@ async function handleTicketDetailsModal(interaction) {
 
   await interaction.deferReply({ ephemeral: true });
 
-  const emoji = TICKET_CATEGORY_EMOJIS[category] || '🎫';
-  const categoryLabel = category.charAt(0).toUpperCase() + category.slice(1);
+  const type = TOKEN_TICKET_TYPES[category] || { slug: 'token', label: '🪙 Token Purchase' };
 
   const description = [
     `Ticket created by ${interaction.user}`,
@@ -1362,33 +1362,11 @@ async function handleTicketDetailsModal(interaction) {
   ].join('\n');
 
   const result = await openTicketChannel(interaction.guild, interaction.user, {
-    slug: `ticket-${category}`,
-    label: `${emoji} ${categoryLabel} Ticket`,
+    slug: type.slug,
+    label: type.label,
     description,
   }).catch((error) => {
     console.error('Error creating ticket:', error);
-    return { status: 'error' };
-  });
-
-  if (result.status === 'exists') return interaction.editReply(`❌ You already have an open ticket: <#${result.channelId}>`);
-  if (result.status === 'no_staff_role') return interaction.editReply('❌ Staff role not configured.');
-  if (result.status === 'error') return interaction.editReply('❌ Could not create ticket.');
-
-  await interaction.editReply(`✅ Ticket created: <#${result.channel.id}>`);
-}
-
-const TOKEN_TICKET_TYPES = {
-  single: { slug: 'token-single', label: '🪙 Buy 1 Token' },
-  multi: { slug: 'token-multi', label: '🪙 Buy Multiple Tokens' },
-  bulk: { slug: 'token-bulk', label: '📦 Bulk Buy Tokens' },
-};
-
-async function createTokenTicketChannel(interaction, user, guild, category) {
-  await interaction.deferReply({ ephemeral: true });
-
-  const type = TOKEN_TICKET_TYPES[category] || { slug: 'token', label: '🪙 Token Purchase' };
-  const result = await openTicketChannel(guild, user, type).catch((error) => {
-    console.error('Error creating token ticket:', error);
     return { status: 'error' };
   });
 
