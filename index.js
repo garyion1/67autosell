@@ -121,8 +121,10 @@ function getStaffRoleId(guildId) {
   return guildConfigDB.get(guildId)?.staffRoleId || ENV_STAFF_ROLE;
 }
 
-function getTicketsCategoryId(guildId) {
-  return guildConfigDB.get(guildId)?.ticketsCategoryId || ENV_TICKETS_CATEGORY;
+function getTicketsCategoryId(guildId, typeKey) {
+  const config = guildConfigDB.get(guildId);
+  const override = typeKey && config?.categoryOverrides?.[typeKey];
+  return override || config?.ticketsCategoryId || ENV_TICKETS_CATEGORY;
 }
 
 function findTicketOwner(channelId) {
@@ -520,6 +522,7 @@ async function handleHelp(message) {
       { name: ',giveaway <start|end|reroll|list>', value: 'Run a reaction giveaway', inline: true },
       { name: ',eo <emoji> [name]', value: 'Copy an emoji into this server', inline: true },
       { name: ',config view', value: 'View server config (staff role, ticket category)', inline: true },
+      { name: ',config category <buy|sell|support|token> <#Category|reset>', value: 'Route a ticket type to its own category', inline: true },
       { name: ',logs channel #channel', value: 'Log message edits/deletes there', inline: true },
       { name: ',say <text>', value: 'Post a message as the bot', inline: true },
       { name: ',setup @StaffRole [#Category]', value: 'One-command ticket system setup', inline: true }
@@ -1154,6 +1157,7 @@ async function runAutomod(message) {
 // ============ TICKET SYSTEM ============
 
 const TICKET_CATEGORY_EMOJIS = { buy: '💰', sell: '📦', support: '🆘' };
+const TICKET_TYPE_KEYS = ['buy', 'sell', 'support', 'token'];
 
 async function handlePanel(message) {
   if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
@@ -1207,7 +1211,7 @@ async function handleTokenPanel(message) {
   message.reply('✅ Token panel created!').then(m => m.delete().catch(() => {}));
 }
 
-async function openTicketChannel(guild, user, { slug, label, description }) {
+async function openTicketChannel(guild, user, { slug, label, description, typeKey }) {
   const existingTicket = ticketsDB.get(user.id);
   if (existingTicket) {
     const channel = guild.channels.cache.get(existingTicket);
@@ -1223,7 +1227,7 @@ async function openTicketChannel(guild, user, { slug, label, description }) {
   const channel = await guild.channels.create({
     name: `${slug}-${user.username}`,
     type: ChannelType.GuildText,
-    parent: getTicketsCategoryId(guild.id),
+    parent: getTicketsCategoryId(guild.id, typeKey),
     permissionOverwrites: [
       {
         id: guild.id,
@@ -1286,7 +1290,7 @@ async function createTicketChannel(interaction, user, guild, category) {
   const emoji = TICKET_CATEGORY_EMOJIS[category] || '🎫';
   const categoryLabel = category.charAt(0).toUpperCase() + category.slice(1);
 
-  const result = await openTicketChannel(guild, user, { slug: `ticket-${category}`, label: `${emoji} ${categoryLabel} Ticket` }).catch((error) => {
+  const result = await openTicketChannel(guild, user, { slug: `ticket-${category}`, label: `${emoji} ${categoryLabel} Ticket`, typeKey: category }).catch((error) => {
     console.error('Error creating ticket:', error);
     return { status: 'error' };
   });
@@ -1365,6 +1369,7 @@ async function handleTicketDetailsModal(interaction) {
     slug: type.slug,
     label: type.label,
     description,
+    typeKey: 'token',
   }).catch((error) => {
     console.error('Error creating ticket:', error);
     return { status: 'error' };
@@ -1842,13 +1847,19 @@ async function handleConfig(message, args) {
   const config = guildConfigDB.get(guildId) || {};
 
   if (sub === 'view') {
+    const overrides = config.categoryOverrides || {};
+    const overrideLines = TICKET_TYPE_KEYS
+      .map((t) => `**${t}**: ${overrides[t] ? `<#${overrides[t]}>` : 'default'}`)
+      .join('\n');
+
     const embed = new EmbedBuilder()
       .setColor('#2f3136')
       .setTitle('⚙️ Server Config')
       .addFields(
         { name: 'Staff Role', value: config.staffRoleId ? `<@&${config.staffRoleId}>` : `<@&${ENV_STAFF_ROLE}> (default)`, inline: true },
         { name: 'Tickets Category', value: config.ticketsCategoryId ? `\`${config.ticketsCategoryId}\`` : `\`${ENV_TICKETS_CATEGORY}\` (default)`, inline: true },
-        { name: 'Transcript Log Channel', value: transcriptChannelDB.get(guildId) ? `<#${transcriptChannelDB.get(guildId)}>` : 'Not set', inline: true }
+        { name: 'Transcript Log Channel', value: transcriptChannelDB.get(guildId) ? `<#${transcriptChannelDB.get(guildId)}>` : 'Not set', inline: true },
+        { name: 'Per-Type Categories', value: overrideLines, inline: false }
       );
     return message.reply({ embeds: [embed] });
   }
@@ -1871,7 +1882,30 @@ async function handleConfig(message, args) {
     return message.reply(`✅ Tickets category set to \`${categoryId}\`.`);
   }
 
-  return message.reply('❌ Usage: `,config <view|staffrole|ticketcategory>`');
+  if (sub === 'category') {
+    const type = (args[1] || '').toLowerCase();
+    if (!TICKET_TYPE_KEYS.includes(type)) {
+      return message.reply(`❌ Usage: \`,config category <${TICKET_TYPE_KEYS.join('|')}> <#Category|reset>\``);
+    }
+
+    if ((args[2] || '').toLowerCase() === 'reset') {
+      if (config.categoryOverrides) delete config.categoryOverrides[type];
+      guildConfigDB.set(guildId, config);
+      markDirty();
+      return message.reply(`✅ **${type}** tickets will now use the default tickets category.`);
+    }
+
+    const category = message.mentions.channels.find((c) => c.type === ChannelType.GuildCategory);
+    if (!category) return message.reply(`❌ Usage: \`,config category ${type} #Category\` (mention an existing category channel, or \`reset\`)`);
+
+    config.categoryOverrides = config.categoryOverrides || {};
+    config.categoryOverrides[type] = category.id;
+    guildConfigDB.set(guildId, config);
+    markDirty();
+    return message.reply(`✅ **${type}** tickets will now be created under **${category.name}**.`);
+  }
+
+  return message.reply('❌ Usage: `,config <view|staffrole|ticketcategory|category>`');
 }
 
 async function handleSay(message, args) {
