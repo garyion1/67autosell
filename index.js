@@ -429,7 +429,7 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isStringSelectMenu()) {
     const category = interaction.values[0];
     if (interaction.customId === 'ticket_select') {
-      await createTicketChannel(interaction, user, guild, category);
+      await showMainTicketModal(interaction, category);
     } else if (interaction.customId === 'tokenticket_select') {
       await showTicketDetailsModal(interaction, category);
     } else if (interaction.customId === 'ticket_priority_select') {
@@ -441,6 +441,8 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isModalSubmit()) {
     if (interaction.customId === 'ticket_rename_modal') {
       await handleTicketRenameModal(interaction);
+    } else if (interaction.customId.startsWith('main_ticket_modal:')) {
+      await handleMainTicketModal(interaction);
     } else if (interaction.customId.startsWith('ticket_details_modal:')) {
       await handleTicketDetailsModal(interaction);
     }
@@ -522,7 +524,7 @@ async function handleHelp(message) {
       { name: ',giveaway <start|end|reroll|list>', value: 'Run a reaction giveaway', inline: true },
       { name: ',eo <emoji> [name]', value: 'Copy an emoji into this server', inline: true },
       { name: ',config view', value: 'View server config (staff role, ticket category)', inline: true },
-      { name: ',config category <buy|sell|support|token> <#Category|reset>', value: 'Route a ticket type to its own category', inline: true },
+      { name: ',config category <buy|sell|support|token> <category_id|reset>', value: 'Route a ticket type to its own category', inline: true },
       { name: ',logs channel #channel', value: 'Log message edits/deletes there', inline: true },
       { name: ',say <text>', value: 'Post a message as the bot', inline: true },
       { name: ',setup @StaffRole [#Category]', value: 'One-command ticket system setup', inline: true }
@@ -1284,13 +1286,71 @@ async function openTicketChannel(guild, user, { slug, label, description, typeKe
   return { status: 'created', channel };
 }
 
-async function createTicketChannel(interaction, user, guild, category) {
+const MAIN_TICKET_MODAL_FIELDS = {
+  buy: [
+    { id: 'item', label: 'What do you want to buy?', style: TextInputStyle.Short },
+    { id: 'budget', label: 'How much are you spending?', style: TextInputStyle.Short },
+    { id: 'payment_method', label: 'Payment method', style: TextInputStyle.Short },
+  ],
+  sell: [
+    { id: 'item', label: 'What do you want to sell?', style: TextInputStyle.Short },
+    { id: 'price', label: 'Asking price', style: TextInputStyle.Short },
+    { id: 'payment_method', label: 'Payment method', style: TextInputStyle.Short },
+  ],
+  support: [
+    { id: 'issue', label: 'Describe your issue', style: TextInputStyle.Paragraph },
+  ],
+};
+
+async function showMainTicketModal(interaction, category) {
+  const emoji = TICKET_CATEGORY_EMOJIS[category] || '🎫';
+  const categoryLabel = category.charAt(0).toUpperCase() + category.slice(1);
+  const fields = MAIN_TICKET_MODAL_FIELDS[category] || [];
+
+  const modal = new ModalBuilder()
+    .setCustomId(`main_ticket_modal:${category}`)
+    .setTitle(`${emoji} ${categoryLabel} Ticket`);
+
+  modal.addComponents(
+    ...fields.map((f) =>
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId(f.id)
+          .setLabel(f.label)
+          .setStyle(f.style)
+          .setRequired(true)
+          .setMaxLength(f.style === TextInputStyle.Paragraph ? 1000 : 100)
+      )
+    )
+  );
+
+  await interaction.showModal(modal);
+}
+
+async function handleMainTicketModal(interaction) {
+  const category = interaction.customId.split(':')[1];
+  const fields = MAIN_TICKET_MODAL_FIELDS[category] || [];
+  const answers = fields.map((f) => ({ label: f.label, value: interaction.fields.getTextInputValue(f.id) }));
+
   await interaction.deferReply({ ephemeral: true });
 
   const emoji = TICKET_CATEGORY_EMOJIS[category] || '🎫';
   const categoryLabel = category.charAt(0).toUpperCase() + category.slice(1);
 
-  const result = await openTicketChannel(guild, user, { slug: `ticket-${category}`, label: `${emoji} ${categoryLabel} Ticket`, typeKey: category }).catch((error) => {
+  const description = [
+    `Ticket created by ${interaction.user}`,
+    '',
+    ...answers.map((a) => `**${a.label}:** ${a.value}`),
+    '',
+    'Staff will be with you shortly. Use `,close` to close this ticket.',
+  ].join('\n');
+
+  const result = await openTicketChannel(interaction.guild, interaction.user, {
+    slug: `ticket-${category}`,
+    label: `${emoji} ${categoryLabel} Ticket`,
+    description,
+    typeKey: category,
+  }).catch((error) => {
     console.error('Error creating ticket:', error);
     return { status: 'error' };
   });
@@ -1885,24 +1945,27 @@ async function handleConfig(message, args) {
   if (sub === 'category') {
     const type = (args[1] || '').toLowerCase();
     if (!TICKET_TYPE_KEYS.includes(type)) {
-      return message.reply(`❌ Usage: \`,config category <${TICKET_TYPE_KEYS.join('|')}> <#Category|reset>\``);
+      return message.reply(`❌ Usage: \`,config category <${TICKET_TYPE_KEYS.join('|')}> <category_id|reset>\``);
     }
 
-    if ((args[2] || '').toLowerCase() === 'reset') {
+    const value = args[2];
+
+    if ((value || '').toLowerCase() === 'reset') {
       if (config.categoryOverrides) delete config.categoryOverrides[type];
       guildConfigDB.set(guildId, config);
       markDirty();
       return message.reply(`✅ **${type}** tickets will now use the default tickets category.`);
     }
 
-    const category = message.mentions.channels.find((c) => c.type === ChannelType.GuildCategory);
-    if (!category) return message.reply(`❌ Usage: \`,config category ${type} #Category\` (mention an existing category channel, or \`reset\`)`);
+    if (!value || !/^\d{17,20}$/.test(value)) {
+      return message.reply(`❌ Usage: \`,config category ${type} <category_id>\` (right-click the category → Copy Channel ID, or \`reset\`)`);
+    }
 
     config.categoryOverrides = config.categoryOverrides || {};
-    config.categoryOverrides[type] = category.id;
+    config.categoryOverrides[type] = value;
     guildConfigDB.set(guildId, config);
     markDirty();
-    return message.reply(`✅ **${type}** tickets will now be created under **${category.name}**.`);
+    return message.reply(`✅ **${type}** tickets will now be created under category \`${value}\`.`);
   }
 
   return message.reply('❌ Usage: `,config <view|staffrole|ticketcategory|category>`');
