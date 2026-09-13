@@ -1158,8 +1158,9 @@ async function runAutomod(message) {
 
 // ============ TICKET SYSTEM ============
 
-const TICKET_CATEGORY_EMOJIS = { buy: '💰', sell: '📦', support: '🆘' };
-const TICKET_TYPE_KEYS = ['buy', 'sell', 'support', 'token'];
+const TICKET_CATEGORY_EMOJIS = { buy: '💰', sell: '📦', support: '🆘', texturepack: '🎨' };
+const TICKET_CATEGORY_LABELS = { buy: 'Buy', sell: 'Sell', support: 'Support', texturepack: 'Texture Pack' };
+const TICKET_TYPE_KEYS = ['buy', 'sell', 'support', 'texturepack', 'token'];
 
 async function handlePanel(message) {
   if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
@@ -1178,7 +1179,8 @@ async function handlePanel(message) {
     .addOptions(
       { label: 'Buy', value: 'buy', emoji: TICKET_CATEGORY_EMOJIS.buy },
       { label: 'Sell', value: 'sell', emoji: TICKET_CATEGORY_EMOJIS.sell },
-      { label: 'Support', value: 'support', emoji: TICKET_CATEGORY_EMOJIS.support }
+      { label: 'Support', value: 'support', emoji: TICKET_CATEGORY_EMOJIS.support },
+      { label: 'Texture Packs', value: 'texturepack', emoji: TICKET_CATEGORY_EMOJIS.texturepack }
     );
 
   const row = new ActionRowBuilder().addComponents(menu);
@@ -1300,11 +1302,16 @@ const MAIN_TICKET_MODAL_FIELDS = {
   support: [
     { id: 'issue', label: 'Describe your issue', style: TextInputStyle.Paragraph },
   ],
+  texturepack: [
+    { id: 'pack_name', label: 'Which texture pack do you want?', style: TextInputStyle.Short },
+    { id: 'resolution', label: 'Resolution (16x, 32x, 64x, etc)', style: TextInputStyle.Short },
+    { id: 'payment_method', label: 'Payment method', style: TextInputStyle.Short },
+  ],
 };
 
 async function showMainTicketModal(interaction, category) {
   const emoji = TICKET_CATEGORY_EMOJIS[category] || '🎫';
-  const categoryLabel = category.charAt(0).toUpperCase() + category.slice(1);
+  const categoryLabel = TICKET_CATEGORY_LABELS[category] || (category.charAt(0).toUpperCase() + category.slice(1));
   const fields = MAIN_TICKET_MODAL_FIELDS[category] || [];
 
   const modal = new ModalBuilder()
@@ -1335,7 +1342,7 @@ async function handleMainTicketModal(interaction) {
   await interaction.deferReply({ ephemeral: true });
 
   const emoji = TICKET_CATEGORY_EMOJIS[category] || '🎫';
-  const categoryLabel = category.charAt(0).toUpperCase() + category.slice(1);
+  const categoryLabel = TICKET_CATEGORY_LABELS[category] || (category.charAt(0).toUpperCase() + category.slice(1));
 
   const description = [
     `Ticket created by ${interaction.user}`,
