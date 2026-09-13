@@ -121,8 +121,10 @@ function getStaffRoleId(guildId) {
   return guildConfigDB.get(guildId)?.staffRoleId || ENV_STAFF_ROLE;
 }
 
-function getTicketsCategoryId(guildId) {
-  return guildConfigDB.get(guildId)?.ticketsCategoryId || ENV_TICKETS_CATEGORY;
+function getTicketsCategoryId(guildId, typeKey) {
+  const config = guildConfigDB.get(guildId);
+  const override = typeKey && config?.categoryOverrides?.[typeKey];
+  return override || config?.ticketsCategoryId || ENV_TICKETS_CATEGORY;
 }
 
 function findTicketOwner(channelId) {
@@ -427,9 +429,9 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isStringSelectMenu()) {
     const category = interaction.values[0];
     if (interaction.customId === 'ticket_select') {
-      await createTicketChannel(interaction, user, guild, category);
+      await showMainTicketModal(interaction, category);
     } else if (interaction.customId === 'tokenticket_select') {
-      await createTokenTicketChannel(interaction, user, guild, category);
+      await showTicketDetailsModal(interaction, category);
     } else if (interaction.customId === 'ticket_priority_select') {
       await handleTicketPrioritySelect(interaction);
     }
@@ -439,6 +441,10 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isModalSubmit()) {
     if (interaction.customId === 'ticket_rename_modal') {
       await handleTicketRenameModal(interaction);
+    } else if (interaction.customId.startsWith('main_ticket_modal:')) {
+      await handleMainTicketModal(interaction);
+    } else if (interaction.customId.startsWith('ticket_details_modal:')) {
+      await handleTicketDetailsModal(interaction);
     }
     return;
   }
@@ -518,6 +524,7 @@ async function handleHelp(message) {
       { name: ',giveaway <start|end|reroll|list>', value: 'Run a reaction giveaway', inline: true },
       { name: ',eo <emoji> [name]', value: 'Copy an emoji into this server', inline: true },
       { name: ',config view', value: 'View server config (staff role, ticket category)', inline: true },
+      { name: ',config category <buy|sell|support|token> <category_id|reset>', value: 'Route a ticket type to its own category', inline: true },
       { name: ',logs channel #channel', value: 'Log message edits/deletes there', inline: true },
       { name: ',say <text>', value: 'Post a message as the bot', inline: true },
       { name: ',setup @StaffRole [#Category]', value: 'One-command ticket system setup', inline: true }
@@ -1151,6 +1158,10 @@ async function runAutomod(message) {
 
 // ============ TICKET SYSTEM ============
 
+const TICKET_CATEGORY_EMOJIS = { buy: '💰', sell: '📦', support: '🆘', texturepack: '🎨' };
+const TICKET_CATEGORY_LABELS = { buy: 'Buy', sell: 'Sell', support: 'Support', texturepack: 'Texture Pack' };
+const TICKET_TYPE_KEYS = ['buy', 'sell', 'support', 'texturepack', 'token'];
+
 async function handlePanel(message) {
   if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
     return message.reply('❌ Only admins can create the ticket panel.');
@@ -1166,9 +1177,10 @@ async function handlePanel(message) {
     .setCustomId('ticket_select')
     .setPlaceholder('Select a ticket type')
     .addOptions(
-      { label: 'Buy', value: 'buy', emoji: '💰' },
-      { label: 'Sell', value: 'sell', emoji: '📦' },
-      { label: 'Support', value: 'support', emoji: '🆘' }
+      { label: 'Buy', value: 'buy', emoji: TICKET_CATEGORY_EMOJIS.buy },
+      { label: 'Sell', value: 'sell', emoji: TICKET_CATEGORY_EMOJIS.sell },
+      { label: 'Support', value: 'support', emoji: TICKET_CATEGORY_EMOJIS.support },
+      { label: 'Texture Packs', value: 'texturepack', emoji: TICKET_CATEGORY_EMOJIS.texturepack }
     );
 
   const row = new ActionRowBuilder().addComponents(menu);
@@ -1203,7 +1215,7 @@ async function handleTokenPanel(message) {
   message.reply('✅ Token panel created!').then(m => m.delete().catch(() => {}));
 }
 
-async function openTicketChannel(guild, user, { slug, label, description }) {
+async function openTicketChannel(guild, user, { slug, label, description, typeKey }) {
   const existingTicket = ticketsDB.get(user.id);
   if (existingTicket) {
     const channel = guild.channels.cache.get(existingTicket);
@@ -1219,7 +1231,7 @@ async function openTicketChannel(guild, user, { slug, label, description }) {
   const channel = await guild.channels.create({
     name: `${slug}-${user.username}`,
     type: ChannelType.GuildText,
-    parent: getTicketsCategoryId(guild.id),
+    parent: getTicketsCategoryId(guild.id, typeKey),
     permissionOverwrites: [
       {
         id: guild.id,
@@ -1276,15 +1288,76 @@ async function openTicketChannel(guild, user, { slug, label, description }) {
   return { status: 'created', channel };
 }
 
-async function createTicketChannel(interaction, user, guild, category) {
+const MAIN_TICKET_MODAL_FIELDS = {
+  buy: [
+    { id: 'item', label: 'What do you want to buy?', style: TextInputStyle.Short },
+    { id: 'budget', label: 'How much are you spending?', style: TextInputStyle.Short },
+    { id: 'payment_method', label: 'Payment method', style: TextInputStyle.Short },
+  ],
+  sell: [
+    { id: 'item', label: 'What do you want to sell?', style: TextInputStyle.Short },
+    { id: 'price', label: 'Asking price', style: TextInputStyle.Short },
+    { id: 'payment_method', label: 'Payment method', style: TextInputStyle.Short },
+  ],
+  support: [
+    { id: 'issue', label: 'Describe your issue', style: TextInputStyle.Paragraph },
+  ],
+  texturepack: [
+    { id: 'pack_name', label: 'Which texture pack do you want?', style: TextInputStyle.Short },
+    { id: 'resolution', label: 'Resolution (16x, 32x, 64x, etc)', style: TextInputStyle.Short },
+    { id: 'payment_method', label: 'Payment method', style: TextInputStyle.Short },
+  ],
+};
+
+async function showMainTicketModal(interaction, category) {
+  const emoji = TICKET_CATEGORY_EMOJIS[category] || '🎫';
+  const categoryLabel = TICKET_CATEGORY_LABELS[category] || (category.charAt(0).toUpperCase() + category.slice(1));
+  const fields = MAIN_TICKET_MODAL_FIELDS[category] || [];
+
+  const modal = new ModalBuilder()
+    .setCustomId(`main_ticket_modal:${category}`)
+    .setTitle(`${emoji} ${categoryLabel} Ticket`);
+
+  modal.addComponents(
+    ...fields.map((f) =>
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId(f.id)
+          .setLabel(f.label)
+          .setStyle(f.style)
+          .setRequired(true)
+          .setMaxLength(f.style === TextInputStyle.Paragraph ? 1000 : 100)
+      )
+    )
+  );
+
+  await interaction.showModal(modal);
+}
+
+async function handleMainTicketModal(interaction) {
+  const category = interaction.customId.split(':')[1];
+  const fields = MAIN_TICKET_MODAL_FIELDS[category] || [];
+  const answers = fields.map((f) => ({ label: f.label, value: interaction.fields.getTextInputValue(f.id) }));
+
   await interaction.deferReply({ ephemeral: true });
 
-  const categoryLabel = category.charAt(0).toUpperCase() + category.slice(1);
-  const description = category === 'buy'
-    ? `Ticket created by ${user}\n\nHow much would you like to buy, and in what currency?\n\nStaff will be with you shortly. Use \`,close\` to close this ticket.`
-    : undefined;
+  const emoji = TICKET_CATEGORY_EMOJIS[category] || '🎫';
+  const categoryLabel = TICKET_CATEGORY_LABELS[category] || (category.charAt(0).toUpperCase() + category.slice(1));
 
-  const result = await openTicketChannel(guild, user, { slug: `ticket-${category}`, label: `${categoryLabel} Ticket`, description }).catch((error) => {
+  const description = [
+    `Ticket created by ${interaction.user}`,
+    '',
+    ...answers.map((a) => `**${a.label}:** ${a.value}`),
+    '',
+    'Staff will be with you shortly. Use `,close` to close this ticket.',
+  ].join('\n');
+
+  const result = await openTicketChannel(interaction.guild, interaction.user, {
+    slug: `ticket-${category}`,
+    label: `${emoji} ${categoryLabel} Ticket`,
+    description,
+    typeKey: category,
+  }).catch((error) => {
     console.error('Error creating ticket:', error);
     return { status: 'error' };
   });
@@ -1302,12 +1375,70 @@ const TOKEN_TICKET_TYPES = {
   bulk: { slug: 'token-bulk', label: '📦 Bulk Buy Tokens' },
 };
 
-async function createTokenTicketChannel(interaction, user, guild, category) {
+async function showTicketDetailsModal(interaction, category) {
+  const type = TOKEN_TICKET_TYPES[category] || { slug: 'token', label: '🪙 Token Purchase' };
+
+  const modal = new ModalBuilder()
+    .setCustomId(`ticket_details_modal:${category}`)
+    .setTitle(type.label);
+
+  const qtyInput = new TextInputBuilder()
+    .setCustomId('token_qty')
+    .setLabel('How many tokens?')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(50);
+
+  const moneyInput = new TextInputBuilder()
+    .setCustomId('money_amount')
+    .setLabel('How much money are you spending?')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(50);
+
+  const methodInput = new TextInputBuilder()
+    .setCustomId('payment_method')
+    .setLabel('Payment method (PayPal, CashApp, etc)')
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(50);
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(qtyInput),
+    new ActionRowBuilder().addComponents(moneyInput),
+    new ActionRowBuilder().addComponents(methodInput)
+  );
+
+  await interaction.showModal(modal);
+}
+
+async function handleTicketDetailsModal(interaction) {
+  const category = interaction.customId.split(':')[1];
+  const tokenQty = interaction.fields.getTextInputValue('token_qty');
+  const moneyAmount = interaction.fields.getTextInputValue('money_amount');
+  const paymentMethod = interaction.fields.getTextInputValue('payment_method');
+
   await interaction.deferReply({ ephemeral: true });
 
   const type = TOKEN_TICKET_TYPES[category] || { slug: 'token', label: '🪙 Token Purchase' };
-  const result = await openTicketChannel(guild, user, type).catch((error) => {
-    console.error('Error creating token ticket:', error);
+
+  const description = [
+    `Ticket created by ${interaction.user}`,
+    '',
+    `**Tokens:** ${tokenQty}`,
+    `**Money:** ${moneyAmount}`,
+    `**Payment Method:** ${paymentMethod}`,
+    '',
+    'Staff will be with you shortly. Use `,close` to close this ticket.',
+  ].join('\n');
+
+  const result = await openTicketChannel(interaction.guild, interaction.user, {
+    slug: type.slug,
+    label: type.label,
+    description,
+    typeKey: 'token',
+  }).catch((error) => {
+    console.error('Error creating ticket:', error);
     return { status: 'error' };
   });
 
@@ -1783,13 +1914,19 @@ async function handleConfig(message, args) {
   const config = guildConfigDB.get(guildId) || {};
 
   if (sub === 'view') {
+    const overrides = config.categoryOverrides || {};
+    const overrideLines = TICKET_TYPE_KEYS
+      .map((t) => `**${t}**: ${overrides[t] ? `<#${overrides[t]}>` : 'default'}`)
+      .join('\n');
+
     const embed = new EmbedBuilder()
       .setColor('#2f3136')
       .setTitle('⚙️ Server Config')
       .addFields(
         { name: 'Staff Role', value: config.staffRoleId ? `<@&${config.staffRoleId}>` : `<@&${ENV_STAFF_ROLE}> (default)`, inline: true },
         { name: 'Tickets Category', value: config.ticketsCategoryId ? `\`${config.ticketsCategoryId}\`` : `\`${ENV_TICKETS_CATEGORY}\` (default)`, inline: true },
-        { name: 'Transcript Log Channel', value: transcriptChannelDB.get(guildId) ? `<#${transcriptChannelDB.get(guildId)}>` : 'Not set', inline: true }
+        { name: 'Transcript Log Channel', value: transcriptChannelDB.get(guildId) ? `<#${transcriptChannelDB.get(guildId)}>` : 'Not set', inline: true },
+        { name: 'Per-Type Categories', value: overrideLines, inline: false }
       );
     return message.reply({ embeds: [embed] });
   }
@@ -1812,7 +1949,33 @@ async function handleConfig(message, args) {
     return message.reply(`✅ Tickets category set to \`${categoryId}\`.`);
   }
 
-  return message.reply('❌ Usage: `,config <view|staffrole|ticketcategory>`');
+  if (sub === 'category') {
+    const type = (args[1] || '').toLowerCase();
+    if (!TICKET_TYPE_KEYS.includes(type)) {
+      return message.reply(`❌ Usage: \`,config category <${TICKET_TYPE_KEYS.join('|')}> <category_id|reset>\``);
+    }
+
+    const value = args[2];
+
+    if ((value || '').toLowerCase() === 'reset') {
+      if (config.categoryOverrides) delete config.categoryOverrides[type];
+      guildConfigDB.set(guildId, config);
+      markDirty();
+      return message.reply(`✅ **${type}** tickets will now use the default tickets category.`);
+    }
+
+    if (!value || !/^\d{17,20}$/.test(value)) {
+      return message.reply(`❌ Usage: \`,config category ${type} <category_id>\` (right-click the category → Copy Channel ID, or \`reset\`)`);
+    }
+
+    config.categoryOverrides = config.categoryOverrides || {};
+    config.categoryOverrides[type] = value;
+    guildConfigDB.set(guildId, config);
+    markDirty();
+    return message.reply(`✅ **${type}** tickets will now be created under category \`${value}\`.`);
+  }
+
+  return message.reply('❌ Usage: `,config <view|staffrole|ticketcategory|category>`');
 }
 
 async function handleSay(message, args) {
